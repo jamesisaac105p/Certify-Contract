@@ -526,3 +526,357 @@
 (define-private (get-skill-endorsement-by-index-helper (index uint))
   (map-get? skill-endorsements { skill-id: u1, endorsement-index: index })
 )
+
+;; Certificate Verification History & Analytics System
+(define-constant ERR_VERIFIER_NOT_REGISTERED (err u111))
+(define-constant ERR_VERIFICATION_NOT_FOUND (err u112))
+(define-constant ERR_INVALID_VERIFICATION_PURPOSE (err u113))
+(define-constant ERR_VERIFICATION_ALREADY_EXISTS (err u114))
+
+(define-data-var verification-counter uint u0)
+(define-data-var verifier-counter uint u0)
+
+;; Track individual verification events
+(define-map certificate-verifications
+  { certificate-id: uint, verification-index: uint }
+  {
+    verification-id: uint,
+    verifier: principal,
+    verification-purpose: (string-ascii 100), ;; "employment", "admission", "audit", etc.
+    verification-date: uint,
+    verification-result: bool, ;; true if valid, false if issues found
+    notes: (optional (string-ascii 200)),
+    verifier-reputation: uint ;; snapshot of verifier reputation at time of verification
+  }
+)
+
+;; Count verifications per certificate
+(define-map certificate-verification-count
+  { certificate-id: uint }
+  { count: uint }
+)
+
+;; Track verifier profiles and reputation
+(define-map registered-verifiers
+  { verifier: principal }
+  {
+    verifier-id: uint,
+    organization: (string-ascii 100),
+    verifier-type: (string-ascii 50), ;; "employer", "institution", "auditor", "government"
+    registration-date: uint,
+    total-verifications: uint,
+    successful-verifications: uint,
+    reputation-score: uint, ;; 0-1000 scale
+    verified-status: bool,
+    last-activity: uint
+  }
+)
+
+;; Analytics data per certificate
+(define-map certificate-analytics
+  { certificate-id: uint }
+  {
+    total-verifications: uint,
+    unique-verifiers: uint,
+    last-verified: uint,
+    verification-rate: uint, ;; verifications per month
+    trust-score: uint, ;; 0-1000 based on verification patterns
+    most-common-purpose: (string-ascii 100),
+    suspicious-activity: bool
+  }
+)
+
+;; Track verification patterns by purpose
+(define-map verification-purposes
+  { purpose: (string-ascii 100) }
+  {
+    total-count: uint,
+    success-rate: uint,
+    avg-verifier-reputation: uint
+  }
+)
+
+;; Track verifier networks (who verifies together)
+(define-map verifier-relationships
+  { verifier1: principal, verifier2: principal }
+  {
+    shared-verifications: uint,
+    relationship-strength: uint, ;; 0-100
+    first-interaction: uint,
+    last-interaction: uint
+  }
+)
+
+;; Monthly verification statistics
+(define-map monthly-verification-stats
+  { year: uint, month: uint }
+  {
+    total-verifications: uint,
+    unique-certificates: uint,
+    unique-verifiers: uint,
+    avg-trust-score: uint
+  }
+)
+
+;; Register as a verified entity that can perform certificate verifications
+(define-public (register-verifier 
+  (organization (string-ascii 100))
+  (verifier-type (string-ascii 50))
+)
+  (let
+    (
+      (current-counter (var-get verifier-counter))
+      (new-verifier-id (+ current-counter u1))
+      (existing-verifier (map-get? registered-verifiers { verifier: tx-sender }))
+    )
+    ;; Check if already registered
+    (asserts! (is-none existing-verifier) ERR_VERIFICATION_ALREADY_EXISTS)
+    
+    ;; Register the verifier
+    (map-set registered-verifiers
+      { verifier: tx-sender }
+      {
+        verifier-id: new-verifier-id,
+        organization: organization,
+        verifier-type: verifier-type,
+        registration-date: stacks-block-height,
+        total-verifications: u0,
+        successful-verifications: u0,
+        reputation-score: u500, ;; Start with medium reputation
+        verified-status: false, ;; Needs manual verification by contract owner
+        last-activity: stacks-block-height
+      }
+    )
+    
+    (var-set verifier-counter new-verifier-id)
+    (ok new-verifier-id)
+  )
+)
+
+;; Verify a verifier's status (only contract owner)
+(define-public (verify-verifier-status (verifier principal) (verified bool))
+  (let
+    (
+      (verifier-data (unwrap! (map-get? registered-verifiers { verifier: verifier }) ERR_VERIFIER_NOT_REGISTERED))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    
+    (map-set registered-verifiers
+      { verifier: verifier }
+      (merge verifier-data { verified-status: verified })
+    )
+    (ok true)
+  )
+)
+
+;; Perform a certificate verification
+(define-public (verify-certificate-detailed
+  (certificate-id uint)
+  (verification-purpose (string-ascii 100))
+  (verification-result bool)
+  (notes (optional (string-ascii 200)))
+)
+  (let
+    (
+      (certificate (unwrap! (map-get? certificates { certificate-id: certificate-id }) ERR_CERTIFICATE_NOT_FOUND))
+      (verifier-data (unwrap! (map-get? registered-verifiers { verifier: tx-sender }) ERR_VERIFIER_NOT_REGISTERED))
+      (current-verification-count (default-to u0 (get count (map-get? certificate-verification-count { certificate-id: certificate-id }))))
+      (current-counter (var-get verification-counter))
+      (new-verification-id (+ current-counter u1))
+    )
+    ;; Ensure verifier is verified
+    (asserts! (get verified-status verifier-data) ERR_NOT_AUTHORIZED)
+    ;; Ensure certificate is not revoked
+    (asserts! (not (get revoked certificate)) ERR_CERTIFICATE_REVOKED)
+    
+    ;; Record the verification
+    (map-set certificate-verifications
+      { certificate-id: certificate-id, verification-index: current-verification-count }
+      {
+        verification-id: new-verification-id,
+        verifier: tx-sender,
+        verification-purpose: verification-purpose,
+        verification-date: stacks-block-height,
+        verification-result: verification-result,
+        notes: notes,
+        verifier-reputation: (get reputation-score verifier-data)
+      }
+    )
+    
+    ;; Update verification count for certificate
+    (map-set certificate-verification-count
+      { certificate-id: certificate-id }
+      { count: (+ current-verification-count u1) }
+    )
+    
+    ;; Update verifier statistics
+    (map-set registered-verifiers
+      { verifier: tx-sender }
+      (merge verifier-data {
+        total-verifications: (+ (get total-verifications verifier-data) u1),
+        successful-verifications: (if verification-result 
+          (+ (get successful-verifications verifier-data) u1)
+          (get successful-verifications verifier-data)
+        ),
+        last-activity: stacks-block-height
+      })
+    )
+    
+    ;; Update verification purposes statistics
+    (unwrap-panic (update-verification-purpose-stats verification-purpose verification-result (get reputation-score verifier-data)))
+    
+    ;; Update certificate analytics
+    (unwrap-panic (update-certificate-analytics certificate-id verification-purpose))
+    
+    (var-set verification-counter new-verification-id)
+    (ok new-verification-id)
+  )
+)
+
+;; Private function to update verification purpose statistics
+(define-private (update-verification-purpose-stats 
+  (purpose (string-ascii 100))
+  (result bool)
+  (verifier-reputation uint)
+)
+  (let
+    (
+      (current-stats (map-get? verification-purposes { purpose: purpose }))
+      (total-count (+ (default-to u0 (get total-count current-stats)) u1))
+      (current-successes (default-to u0 (get success-rate current-stats)))
+      (new-success-rate (if result 
+        (/ (* (+ current-successes u1) u100) total-count)
+        (/ (* current-successes u100) total-count)
+      ))
+      (current-avg-rep (default-to u500 (get avg-verifier-reputation current-stats)))
+      (new-avg-rep (/ (+ (* current-avg-rep (- total-count u1)) verifier-reputation) total-count))
+    )
+    
+    (map-set verification-purposes
+      { purpose: purpose }
+      {
+        total-count: total-count,
+        success-rate: new-success-rate,
+        avg-verifier-reputation: new-avg-rep
+      }
+    )
+    (ok true)
+  )
+)
+
+;; Private function to update certificate analytics
+(define-private (update-certificate-analytics 
+  (certificate-id uint)
+  (purpose (string-ascii 100))
+)
+  (let
+    (
+      (current-analytics (map-get? certificate-analytics { certificate-id: certificate-id }))
+      (total-verifications (+ (default-to u0 (get total-verifications current-analytics)) u1))
+      (current-trust-score (default-to u500 (get trust-score current-analytics)))
+      ;; Simple trust score calculation based on verification count and recency
+      (new-trust-score (if (> total-verifications u5) 
+        (if (> (+ current-trust-score u50) u1000) u1000 (+ current-trust-score u50))
+        (+ current-trust-score u20)
+      ))
+    )
+    
+    (map-set certificate-analytics
+      { certificate-id: certificate-id }
+      {
+        total-verifications: total-verifications,
+        unique-verifiers: (+ (default-to u0 (get unique-verifiers current-analytics)) u1), ;; Simplified
+        last-verified: stacks-block-height,
+        verification-rate: (/ total-verifications u30), ;; Simplified rate calculation
+        trust-score: new-trust-score,
+        most-common-purpose: purpose, ;; Simplified - would need more logic for accurate tracking
+        suspicious-activity: false ;; Simplified - would need pattern analysis
+      }
+    )
+    (ok true)
+  )
+)
+
+;; Get verification history for a certificate
+(define-read-only (get-certificate-verification-history (certificate-id uint))
+  (let
+    (
+      (verification-count (default-to u0 (get count (map-get? certificate-verification-count { certificate-id: certificate-id }))))
+    )
+    ;; Return first 10 verifications (simplified)
+    (map get-verification-by-index-helper (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9))
+  )
+)
+
+;; Get specific verification by index
+(define-read-only (get-certificate-verification-by-index (certificate-id uint) (index uint))
+  (map-get? certificate-verifications { certificate-id: certificate-id, verification-index: index })
+)
+
+;; Get verifier profile information
+(define-read-only (get-verifier-profile (verifier principal))
+  (map-get? registered-verifiers { verifier: verifier })
+)
+
+;; Get certificate analytics
+(define-read-only (get-certificate-analytics-info (certificate-id uint))
+  (map-get? certificate-analytics { certificate-id: certificate-id })
+)
+
+;; Get verification purpose statistics
+(define-read-only (get-verification-purpose-stats (purpose (string-ascii 100)))
+  (map-get? verification-purposes { purpose: purpose })
+)
+
+;; Get verification count for a certificate
+(define-read-only (get-certificate-verification-count-info (certificate-id uint))
+  (default-to u0 (get count (map-get? certificate-verification-count { certificate-id: certificate-id })))
+)
+
+;; Calculate verifier reputation score
+(define-read-only (calculate-verifier-reputation (verifier principal))
+  (match (map-get? registered-verifiers { verifier: verifier })
+    verifier-data (let
+      (
+        (total-verifs (get total-verifications verifier-data))
+        (successful-verifs (get successful-verifications verifier-data))
+        (base-score (get reputation-score verifier-data))
+      )
+      (if (> total-verifs u0)
+        (+ base-score (/ (* successful-verifs u100) total-verifs))
+        base-score
+      )
+    )
+    u0
+  )
+)
+
+;; Get top verifiers by reputation
+(define-read-only (get-top-verifiers)
+  ;; Simplified - would return list of top verifiers by reputation
+  (some { message: "Top verifiers feature would require iteration logic" })
+)
+
+;; Private helper function for verification history
+(define-private (get-verification-by-index-helper (index uint))
+  (map-get? certificate-verifications { certificate-id: u1, verification-index: index })
+)
+
+;; Update verifier reputation (contract owner only)
+(define-public (update-verifier-reputation (verifier principal) (new-reputation uint))
+  (let
+    (
+      (verifier-data (unwrap! (map-get? registered-verifiers { verifier: verifier }) ERR_VERIFIER_NOT_REGISTERED))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (<= new-reputation u1000) ERR_INVALID_SKILL_LEVEL)
+    
+    (map-set registered-verifiers
+      { verifier: verifier }
+      (merge verifier-data { reputation-score: new-reputation })
+    )
+    (ok true)
+  )
+)
+
+
