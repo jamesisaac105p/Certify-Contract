@@ -13,6 +13,27 @@ epoch = 3.1
 path = 'contracts/CertificateBatchIssuer.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.will-amendments]
+path = 'contracts/will-amendments.clar'
+clarity_version = 3
+epoch = 3.1
+
+
+
+[contracts.CertificateRenewal]
+path = 'contracts/CertificateRenewal.clar'
+clarity_version = 3
+epoch = 3.1
+
+
+
+[contracts.blood-compatibility]
+path = 'contracts/blood-compatibility.clar'
+clarity_version = 3
+epoch = 3.1
+
+
 [repl.analysis]
 passes = ['check_checker']
 
