@@ -1,0 +1,44 @@
+[project]
+name = 'Certify'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Certify]
+path = 'contracts/Certify.clar'
+clarity_version = 3
+epoch = 3.1
+[contracts.CertificateBatchIssuer]
+path = 'contracts/CertificateBatchIssuer.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.will-amendments]
+path = 'contracts/will-amendments.clar'
+clarity_version = 3
+epoch = 3.1
+
+
+
+[contracts.CertificateRenewal]
+path = 'contracts/CertificateRenewal.clar'
+clarity_version = 3
+epoch = 3.1
+
+
+
+[contracts.blood-compatibility]
+path = 'contracts/blood-compatibility.clar'
+clarity_version = 3
+epoch = 3.1
+
+
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
